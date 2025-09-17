@@ -9,19 +9,19 @@ import subprocess
 import argparse
 import logging
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ----------------------------------------------------- 
 # CLI 
 # ----------------------------------------------------- 
 parser = argparse.ArgumentParser(description="AMD/ATI Memory Testing Script")
 
-parser.add_argument('--detect', type=bool, help='Search for a Plugged ATI/AMD Cards into the System')
-parser.add_argument('--test', type=bool, help='Executes the Memory Test in the Target GPU Address')
+parser.add_argument('-detect', action='store_true', help='Search for a Plugged ATI/AMD Cards into the System')
+parser.add_argument('-test', action='store_true', help='Executes the Memory Test in the Target GPU Address')
 parser.add_argument('--gpu_address', type=str, help='The starting address of the GPU memory in the BUS')
 parser.add_argument('--size', type=int, default=50, help='The size in MB of the test (Default: 50)')
 parser.add_argument('--mem_chips', type=int, default=8, help='The number of Memory Chips in the GPU Card (Default: 8)')
 parser.add_argument('--logger', type=str, help='Enables the Internal Logger')
+parser.add_argument('--debug', action='store_true', help='Enables the Verbose Output (Affects the Performance and Produce lots of Data)')
 
 args = parser.parse_args()
 
@@ -99,13 +99,21 @@ def detect_cards():
         if "VGA" in lspci_lines[i] and ("AMD" in lspci_lines[i] or "ATI" in lspci_lines[i]):
             detected_lines = detected_lines + lspci_lines[i]
     
-    parsed_data = detected_lines.split("\\n\\t")
-    
+    parsed_data = detected_lines.split("\\n\\t")    
+    modelStr = ""
+        
     for i in range(len(parsed_data)):
-        if "Memory" and " pref" in parsed_data[i]:
-            memory_addr = parsed_data[i].split(" ")
+        lineData = parsed_data[i]
+                
+        if ("AMD" in lineData or "ATI" in lineData):
+            modelStr = lineData
+        
+        if "Memory" and " pref" in lineData:
+            memory_addr = lineData.split(" ")
+            
             logging.info("Detected GPU: ")
-            logging.info(" -- " + parsed_data[i])
+            logging.info(modelStr)
+            logging.info(" -- " + lineData)
             logging.info(" -- Possible GPU Address: " + memory_addr[2])
 
 
@@ -114,12 +122,10 @@ def detect_cards():
 # ----------------------------------------------------
 
 def test_Payload(data, phys_arr, amaifost, nbchips=8):
-        global faultychips
+        faultychips = 0
+        
         if len(phys_arr) > len(data):
             data += b'\x00' * (len(phys_arr) - len(data))
-            
-        logging.info("This test is working to detect bad chips. Warning it can give wrong faulty chip number ; only the amount of faulty chips will be good")
-        logging.info("count the chips counter-clockwise from right to left with pcie near you")
         
         # - Writes into the Address
         phys_arr[:]=data
@@ -141,32 +147,41 @@ def test_Payload(data, phys_arr, amaifost, nbchips=8):
             xored_error = data[i] ^ data_possibly_modified[i]
             
             if xored_error:
-                logging.debug("Bad Address Detected: {i}")
+                logging.debug(f"Bad Address Detected: {i}")
                 
                 for chipIndex in range(nbchips):                 
                     
                  # Check if the current Address is in the Current Memory Chip
                  if i>=chipIndex*256*(1+int(i/(256*nbchips))) and i<(chipIndex+1)*256*(1+int(i/(256*nbchips))):                     
-                    faultychips = faultychips + 1                    
+                            
                     
                     if nbchips > 8:
                         if(amaifost[chipIndex] == 0):
+                            faultychips = faultychips + 1            
                             amaifost[chipIndex] = 1
                             chipId = MemChipIndex["16chips"][chipIndex]                            
-                            logging.error("Chip {chipId} is faulty at Address: {i}")
-                            break                                                                                                                   
-                    elif nbchips==8:                                           
-                        
+                            logging.error(f"Chip {chipId} is faulty at Address: {i}")
+                            break     
+                                                                                                                                      
+                    elif nbchips==8:         
+                        chipfound = False                              
                         for memIndexes in MemChipIndex["8chips"]:
                             if( 
                                (chipIndex==memIndexes['lower'] and amaifost[chipIndex]==0) or
                                (chipIndex==memIndexes['upper'] and amaifost[chipIndex]==0) 
                             ):
-                                amaifost[chipIndex] = 1
+                                amaifost[memIndexes['upper']] = 1
+                                amaifost[memIndexes['lower']] = 1
+                                faultychips = faultychips + 1            
                                 chipId_lower = memIndexes["index"][0]
                                 chipId_upper = memIndexes["index"][1]
                                 
-                                logging.error("Chip {chipId_lower} and/or {chipId_upper} is faulty at address: ${i}")                               
+                                logging.error(f"Chip {chipId_lower} and/or {chipId_upper} is faulty at address: ${i}") 
+                                chipfound
+                                break
+                        
+                        if chipfound:
+                            break                              
             
             
         if not bad_addresses:
@@ -189,9 +204,9 @@ def test_Payload(data, phys_arr, amaifost, nbchips=8):
         
         # Test Results
         total_errors = sum((v[0] for k, v in bad_addresses.items()))
-        logging.info("Faulty Chips= ",faultychips)      
+        logging.info(f"Faulty Chips= {faultychips}")      
         logging.info("Total bytes tested= 4*" + str(len(data)//4))
-        logging.info("Total errors count= ", total_errors, " - every ", len(data)/(total_errors+1), " OK: ", len(data) - total_errors)
+        logging.info(f"Total errors count= {total_errors} - every {len(data)/(total_errors+1)} OK: {len(data) - total_errors}")
             
     # ---- END
     
@@ -206,6 +221,9 @@ def run_tests():
     logging.info(" -- GPU Address: " + args.gpu_address)
     logging.info(" -- Payload Size: " + str(args.size) + "mb")
     logging.info(" -- Memory Chips: " + str(args.mem_chips))
+            
+    logging.info("This test is working to detect bad chips. Warning it can give wrong faulty chip number ; only the amount of faulty chips will be good")
+    logging.info("count the chips counter-clockwise from right to left with pcie near you")
     
     bytesToTest = int(1024 * 1024 * float(args.size))
     offset = int(args.gpu_address, 16)
@@ -227,6 +245,12 @@ def run_tests():
 # Main
 # ----------------------------------------------------
 def main():     
+    logLevel = logging.INFO
+    if(args.debug):
+        logLevel = logging.DEBUG
+        
+    logging.basicConfig(level=logLevel, format='%(asctime)s - %(levelname)s - %(message)s')
+    
     if(args.logger != None and len(args.logger) > 0):        
         logging.getLogger().addHandler(logging.FileHandler(args.logger))
         
@@ -240,7 +264,9 @@ def main():
             exit(0)
             
         if(args.test):
+            run_tests()
             exit(0)
+            
     except Exception as err:
         logging.error(f"[ERROR] Failed to execute the script: {err=}")
 
